@@ -21,7 +21,7 @@ def clean_family(label: str) -> str:
 
 
 def load_raw(data_dir: Path = C.DATA_DIR) -> pd.DataFrame:
-    files = sorted(Path(data_dir).glob("*.csv"))
+    files = sorted(Path(data_dir).rglob("*.csv"))   # searches subfolders too (Kaggle)
     if not files:
         raise FileNotFoundError(f"No CSV in {data_dir}. See data/README.md.")
     parts = []
@@ -60,6 +60,9 @@ def clean(df: pd.DataFrame, log: list) -> pd.DataFrame:
     bad = df[feat].isna().any(axis=1)
     log.append(("rows with NaN or inf removed", int(bad.sum())))
     df = df[~bad]
+    # Cast BEFORE deduplicating: rows that differ only beyond float32 precision
+    # become identical after the cast and would otherwise leak across the split.
+    df[feat] = df[feat].astype(np.float32)
 
     dup = df.duplicated(subset=feat + ["family"])
     log.append(("exact duplicate rows removed", int(dup.sum())))
@@ -70,7 +73,6 @@ def clean(df: pd.DataFrame, log: list) -> pd.DataFrame:
     log.append(("rows with identical features but different labels removed", int(conflict.sum())))
     df = df[~conflict]
 
-    df[feat] = df[feat].astype(np.float32)
     df["y"] = (df["family"] != C.BENIGN).astype(np.int8)
     log.append(("rows after cleaning", len(df)))
     return df.reset_index(drop=True)
@@ -132,3 +134,11 @@ def leakage_check(train, val, test, feat) -> pd.DataFrame:
 
 def resolve_suspects(feat: list, patterns=C.SUSPECT_PATTERNS) -> list:
     return [c for c in feat if any(p in c for p in patterns)]
+
+
+def drop_train_overlap(train, other, feat):
+    """Remove rows of val/test whose (kept) feature vector also appears in train.
+    Needed because columns dropped as constant on train can hide duplicates."""
+    key = lambda d: pd.util.hash_pandas_object(d[feat], index=False)
+    mask = key(other).isin(set(key(train)))
+    return other[~mask.values].reset_index(drop=True), int(mask.sum())
